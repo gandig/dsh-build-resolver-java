@@ -17,12 +17,12 @@ export type ErrorCategory =
   | 'dependency_unresolved'
   | 'dependency_network_failure'
   | 'jdk_version_mismatch'
-  | 'jakarta_javax_mismatch'
-  | 'checkstyle_spotbugs'
-  | 'encoding_error'
   | 'jdk_reflection_inaccessible'
+  | 'jakarta_javax_mismatch'
+  | 'encoding_error'
   | 'enforcer_rule_failure'
   | 'mybatis_mapper_missing'
+  | 'checkstyle_spotbugs'
   | 'unknown';
 
 export interface JavaBuildError {
@@ -43,4 +43,5 @@ export interface ParseResult {
   errors: JavaBuildError[];
   isNetworkOrMirrorFailure: boolean;
   isJdkVersionIssue: boolean;
+  truncated: boolean;
 }

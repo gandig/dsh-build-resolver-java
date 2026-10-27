@@ -1,21 +1,26 @@
 {
   "name": "dsh-build-resolver-java",
   "version": "1.0.0",
-  "description": "Java/Maven/Gradle build, compilation, and dependency error resolution specialist for DeepSeek Harness (DSH). Minimal surgical fixes, framework-aware, zero refactoring.",
+  "description": "Surgical resolver for Java, Maven, and Gradle build, compilation, and dependency errors for DeepSeek Harness.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "icon": "./icon.svg",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
     "skills",
-    "dsh-plugin.json",
+    "locale/*.json",
+    "icon.svg",
     "cordis.patch.yml",
     "README.md",
     "README.zh-CN.md",
@@ -23,12 +28,13 @@
   ],
   "dsh": {
     "bundle": {
-      "patch": "cordis.patch.yml"
+      "patch": "./cordis.patch.yml"
     }
   },
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
+    "prepare": "npm run build",
     "test": "npm run build && node --test test/parser.test.ts",
     "prepublishOnly": "npm test"
   },
@@ -45,7 +51,7 @@
     "build-resolver",
     "compiler-fix"
   ],
-  "author": "baogandiga",
+  "author": "ihuajiu",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -55,17 +61,9 @@
     "url": "https://github.com/ihuajiu/dsh-build-resolver-java/issues"
   },
   "homepage": "https://github.com/ihuajiu/dsh-build-resolver-java#readme",
-  "peerDependencies": {
-    "@deepseek-ai/dsh-tools": ">=0.1.0",
-    "@deepseek-ai/schemastery": ">=0.1.0"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-tools": {
-      "optional": true
-    },
-    "@deepseek-ai/schemastery": {
-      "optional": true
-    }
+  "engines": {
+    "node": ">=20.11.0",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

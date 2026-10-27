@@ -2,7 +2,9 @@
 
 > **Java / Maven / Gradle 构建与编译故障定点修复专家插件** (面向 DeepSeek Harness / DSH 生态)
 >
-> 灵感源自 ECC (Everything Claude Code) 的 `java-build-resolver`，针对 DeepSeek 模型推理特性与国内 Java 企业级生产环境做了深度增强与本土化升级。
+> 灵感源自 ECC (`Everything Claude Code`) 的 `java-build-resolver`，针对 DeepSeek 模型推理特性、Cordis 插件生命周期与现代企业级 Java 生产环境做了深度增强与本土化升级。
+
+[English Documentation](README.md)
 
 ---
 
@@ -16,13 +18,9 @@
 **`dsh-build-resolver-java` 为 DSH 注入了严苛的工程纪律：**
 - 🎯 **外科手术式修复（Surgical Fixes Only）**：绝不重构业务代码，只做最小行级修改。
 - 🛡 **三击熔断保护（Three-Strike Rule）**：同一错误修改 3 次不通过立即中断并分析深层原因，杜绝死循环。
-- 🇨🇳 **国内企业级暗坑深度覆盖**：
-  - Windows GBK 编码致中文源码错乱 (`unmappable character` -> `project.build.sourceEncoding` UTF-8)；
-  - JDK 17/21 强封装反射限制 (`InaccessibleObjectException` -> `--add-opens` 模块导出)；
-  - Maven Enforcer 禁令与依赖收敛拦截 (`BannedDependencies` 排除 & `DependencyConvergence` 版本锁定)；
-  - MyBatis / MyBatis-Plus 资源打包漏打 (`Invalid bound statement` 绑定失败与 POM resources XML 构建期检测)；
-  - 阿里云公共镜像与企业私服超时/PKIX SSL 诊断。
-- ⚡️ **结构化日志解析引擎**：直接解析提取控制台报错的 `[file:line:col]`、错误类型与关键 Symbol，精准投喂给 DeepSeek。
+- 🇨🇳 **企业级暗坑覆盖**：处理中文 Windows 编码异常（GBK）、JDK 17/21 强封装反射限制（`--add-opens`）、Maven Enforcer 依赖收敛与 MyBatis XML 资源漏打。
+- ⚡️ **免疫 ReDoS 的解析引擎**：线性解析日志（<3ms），彻底消除相邻报错间的“上下文串味”误判。
+- 🧩 **全生命周期 DSH 集成**：同时提供运行时工具（`java_parse_build_errors`, `java_inspect_project`）、系统提示词指导与原生 Skill（`java-build-resolver`）。
 
 ---
 
@@ -33,18 +31,29 @@
 # 方式 1：通过 NPM 安装（发布后）
 dsh plugin --profile web add dsh-build-resolver-java
 
-# 方式 2：直接通过 GitHub 仓库安装
-dsh plugin --profile web add github:ihuajiu/dsh-build-resolver-java
+# 方式 2：开发阶段从本地源码目录安装
+dsh plugin --profile web add ./
 ```
+
+---
+
+## 🛠 提供的核心能力
+
+### 1. 内嵌式运行时 Skill (`java-build-resolver`)
+通过 `ctx.skills.register` 自动注册进 DSH 技能目录。当编译失败或用户输入 `/java-build-resolver` 时，DeepSeek 智能体自动唤醒该流程进行逐步定点排查。
+
+### 2. 模型可调用工具 (`ctx.tools`)
+- **`java_parse_build_errors`**：解析 Maven 或 Gradle 终端输出，自动剔除 ANSI 彩色字符与 CI 时间戳，返回结构化坐标 `[file:line:col]`、错误分类、关联符号及外科手术修复动作。
+- **`java_inspect_project`**：静态检测 `pom.xml` 或 `build.gradle`，识别技术栈与潜在配置风险（如编码缺失、MyBatis XML 漏打包）。
 
 ---
 
 ## 🚀 核心工作流
 
 ```text
-1. 框架与环境探查   -> 自动判定 Spring Boot (2.x/3.x) / Quarkus / 通用 Java 与本地 JDK 版本
+1. 框架与环境探查   -> 自动判定 Spring Boot (2.x/3.x) / Quarkus / 通用 Java 并提前预警配置风险
 2. 捕获编译错误     -> 运行轻量 compile 并结构化解析报错行列号与类型
-3. 定位上下文       -> 只读取报错行周边上下文，不加载多余代码
+3. 定位上下文       -> 只读取报错行周边上下文（±15行），不加载多余代码
 4. 外科手术式修复   -> 补齐 import、调整依赖 scope 或修正局部类型
 5. 单步编译验证     -> 重新编译确认错误递减
 6. 熔断保护检查     -> 超过 3 次未修复立即停止汇报
@@ -52,21 +61,26 @@ dsh plugin --profile web add github:ihuajiu/dsh-build-resolver-java
 
 ---
 
-## 🛠 插件结构
+## 📂 项目结构
 
 ```text
 dsh-build-resolver-java/
+├── cordis.patch.yml           # 官方 DSH profile bundle patch (顶层数组格式)
+├── icon.svg                   # 插件矢量图标
+├── locale/                    # DSH 多语言展示元数据
+│   ├── en.json
+│   └── zh.json
 ├── src/
-│   ├── index.ts               # DSH/Cordis 插件主入口 (Tool 注册与系统提示词注入)
+│   ├── index.ts               # Cordis 插件入口 (Tools / Prompt / Skill 注册)
 │   ├── parser.ts              # Maven/Gradle 编译日志正则提取与分类引擎
 │   └── types.ts               # 类型定义
 ├── skills/
 │   └── java-build-resolver/
 │       ├── SKILL.md           # 核心专家规则与工作流指令（移植并升级自 ECC）
 │       └── patterns.md        # 常见错误外科手术修复速查表
-├── test/                      # 单元测试
-├── package.json
-└── tsconfig.json
+├── test/
+│   └── parser.test.ts         # 自动化测试用例
+└── package.json
 ```
 
 ---

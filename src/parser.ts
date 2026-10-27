@@ -1,36 +1,48 @@
 import { JavaBuildError, ParseResult, ErrorCategory, BuildTool, JavaFramework } from './types.js';
 
-const MAX_PARSED_ERRORS = 100;
+export const MAX_PARSED_ERRORS = 100;
 
 /**
- * Strips terminal ANSI escape codes (CSI, OSC, SGR, 256-color, 24-bit truecolor, cursor movement).
+ * Strips ANSI escape codes, OSC sequences, and CSI codes linearly without ReDoS risk.
  */
 export function stripAnsi(text: string): string {
-  if (!text || typeof text !== 'string') {
-    return '';
-  }
+  if (!text) return '';
   return text
-    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
-    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
-    .replace(/\u001b[@-Z\\-_]/g, '');
+    // Strip OSC sequences: \x1b] ... (\x07 | \x1b\\)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    // Strip CSI sequences: \x1b[ ... [a-zA-Z]
+    .replace(/\x1b\[[0-9:;<=>?]*[ -/]*[@-~]/g, '')
+    // Strip raw trailing escape character
+    .replace(/\x1b/g, '');
+}
+
+/**
+ * Normalizes input lines: strips ANSI and CI timestamps.
+ */
+function cleanLineText(rawLine: string): string {
+  let line = stripAnsi(rawLine);
+  // Strip CI/CD timestamps: e.g., 2026-10-27T12:00:00.123 [ERROR] or [14:23:05]
+  line = line.replace(/^\s*(?:\[\d{2}:\d{2}:\d{2}(?:\.\d+)?\]|\d{4}-\d{2}-\d{2}T[^\s]+)\s+/, '');
+  return line;
 }
 
 export function detectBuildTool(filesOrLog: string): BuildTool {
-  if (!filesOrLog || typeof filesOrLog !== 'string') {
-    return 'unknown';
-  }
+  if (!filesOrLog || typeof filesOrLog !== 'string') return 'unknown';
   const clean = stripAnsi(filesOrLog);
   if (
-    /pom\.xml|<project[\s>]|<modelVersion>|xmlns[:\w]*="http:\/\/maven\.apache\.org|\[INFO\] Scanning for projects|\[INFO\] Total time:|org\.apache\.maven\.plugins|mvnw?\s+compile|Some problems were encountered while processing the POMs|Reactor Summary for/i.test(
-      clean
-    )
+    /pom\.xml/i.test(clean) ||
+    /\[INFO\] Scanning for projects/i.test(clean) ||
+    /<project\b[^>]*>/i.test(clean) ||
+    /<modelVersion>/i.test(clean)
   ) {
     return 'maven';
   }
   if (
-    /build\.gradle|\.gradle\.kts|plugins\s*\{|dependencies\s*\{|repositories\s*\{|apply\s+plugin:|sourceCompatibility\s*=|tasks\.withType|> Task :[^\r\n]*FAILED|Execution failed for task|gradlew?\s+compileJava|BUILD FAILED in|Task failed with an exception/i.test(
-      clean
-    )
+    /build\.gradle/i.test(clean) ||
+    /> Task\s+:[^\r\n]*FAILED/i.test(clean) ||
+    /\bplugins\s*\{/i.test(clean) ||
+    /\bdependencies\s*\{/i.test(clean) ||
+    /\bapply\s+plugin:/i.test(clean)
   ) {
     return 'gradle';
   }
@@ -38,9 +50,7 @@ export function detectBuildTool(filesOrLog: string): BuildTool {
 }
 
 export function detectFramework(content: string): JavaFramework {
-  if (!content || typeof content !== 'string') {
-    return 'general';
-  }
+  if (!content || typeof content !== 'string') return 'general';
   const clean = stripAnsi(content);
   if (/org\.springframework\.boot|spring-boot-starter|@SpringBootApplication/i.test(clean)) {
     return 'spring-boot';
@@ -52,7 +62,7 @@ export function detectFramework(content: string): JavaFramework {
 }
 
 export function parseJavaBuildLog(log: string): ParseResult {
-  if (!log || typeof log !== 'string' || log.trim().length === 0) {
+  if (!log || typeof log !== 'string' || !log.trim()) {
     return {
       tool: 'unknown',
       framework: 'general',
@@ -60,144 +70,178 @@ export function parseJavaBuildLog(log: string): ParseResult {
       errors: [],
       isNetworkOrMirrorFailure: false,
       isJdkVersionIssue: false,
+      truncated: false,
     };
   }
 
-  // Strip ANSI color / terminal escape codes first
-  const cleanLog = stripAnsi(log);
   const errors: JavaBuildError[] = [];
-  const lines = cleanLog.split(/\r?\n/);
-  const tool = detectBuildTool(cleanLog);
-  const framework = detectFramework(cleanLog);
+  const rawLines = log.split(/\r?\n/);
+  const tool = detectBuildTool(log);
+  const framework = detectFramework(log);
 
   let isNetworkOrMirrorFailure = false;
   let isJdkVersionIssue = false;
+  let truncated = false;
 
-  // Regex patterns supporting Unix & Windows drive-letter paths, multiple [ERROR] tags, and leading whitespace
-  // Leading [ERROR] prefixes are stripped via cleanLine to guarantee strictly linear O(N) parsing and zero ReDoS backtracking
-  // Maven pattern: [ERROR] /path/to/App.java:[25,18] cannot find symbol
-  // Windows:       [ERROR] C:\path\to\App.java:[25,18] cannot find symbol
+  // Regex patterns
+  // Maven compiler error: [ERROR] /path/to/App.java:[25,18] cannot find symbol
   const mavenErrRegex = /^(?:([a-zA-Z]:[\\/][^:\[\r\n]*|[^:\[\r\n]+)):\[(\d+),(\d+)\]\s+(.*)$/;
 
-  // Gradle pattern: /path/to/App.java:25: error: cannot find symbol
-  // With column:    /path/to/App.java:25:18: error: cannot find symbol
-  // Windows:        C:\path\to\App.java:25:32: error: cannot find symbol
-  // Kotlin/Kapt:    e: /path/to/App.kt:25:18: Unresolved reference: foo
-  const gradleErrRegex = /^\s*(?:e:\s+)?(.+?\.(?:java|kt|groovy|scala)):(\d+)(?::(\d+))?:\s+(?:error:\s+)?(.*)$/i;
+  // Gradle compiler error: /path/to/App.java:25: error: cannot find symbol OR /path/to/App.java:25:10: error:
+  const gradleErrRegex = /^(?:e:\s+)?(.+?\.(?:java|kt|groovy|scala)):(\d+)(?::(\d+))?:\s+error:\s+(.*)$/;
 
-  // Maven POM model error pattern:
-  // [ERROR] 'dependencies.dependency.version' for com.foo:bar:jar is missing. @ line 45, column 17
-  // [ERROR] Non-resolvable parent POM for ... @ /path/to/pom.xml, line 12, column 13
-  const pomErrRegex = /^([^@\r\n]+?)\s*@\s*(?:([^\r\n,]+),\s*)?line\s+(\d+),\s*column\s+(\d+)/i;
+  // Maven POM reactor failure
+  const pomErrRegex = /^([^@\r\n]+?)\s*@\s*(?:([^\r\n,]+),\s*)?line\s+(\d+),\s*column\s+(\d+)/;
+  const childModuleRegex = /^Child module\s+([^\s]+)\s+of\s+([^\s]+)\s+does not exist/i;
 
-  // Maven child module missing pattern:
-  // [ERROR] Child module /path/to/sub/pom.xml of /path/to/parent/pom.xml does not exist
-  const childModuleRegex = /^Child module\s+([^\r\n]+?)\s+of\s+([^\r\n]+?)\s+does not exist/i;
+  let hasExplicitFailureSign = false;
+  let generalFailureMessage = '';
 
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = 0; i < rawLines.length; i++) {
     if (errors.length >= MAX_PARSED_ERRORS) {
+      truncated = true;
       break;
     }
 
-    const rawLine = lines[i];
-    // Strip optional leading timestamps (e.g. CI logs like "2026-10-27T12:00:00.123 [ERROR] ...")
-    const line = rawLine.replace(
-      /^(?:\[?\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\]?|\[?\d{2}:\d{2}:\d{2}(?:\.\d+)?\]?)\s*/,
-      ''
-    );
+    const rawLine = rawLines[i];
+    const cleanLine = cleanLineText(rawLine);
+    const lineWithoutPrefix = cleanLine.replace(/^\s*(?:\[ERROR\]\s*)+/, '');
 
-    if (!line.trim()) {
-      continue;
+    // Check high-level failure banner
+    if (
+      /\bBUILD FAILURE\b|\bCOMPILATION ERROR\b|Execution failed for task\b|Failed to execute goal\b/i.test(
+        cleanLine
+      )
+    ) {
+      hasExplicitFailureSign = true;
+      if (!generalFailureMessage && (/BUILD FAILURE|COMPILATION ERROR|Failed to execute/i.test(cleanLine))) {
+        generalFailureMessage = cleanLine.trim();
+      }
     }
 
-    // Strip leading [ERROR] prefixes in O(N) linear time with no trailing backtrack token
-    const cleanLine = line.replace(/^\s*(?:\[ERROR\]\s*)+/, '');
-
-    // Check network / repository download failures (distinguish genuine network/mirror issue vs missing artifact)
+    // 1. Network / Repository download failures (broad check)
     if (
-      /Transfer failed for|Connection refused|PKIX path building failed|502 Bad Gateway|504 Gateway Timeout|401 Unauthorized|Server returned HTTP response code: 5|Network is unreachable|Connection timed out/i.test(
-        line
+      /Could not resolve dependencies|Transfer failed for|Connection refused|Connection reset|PKIX path building failed|UnknownHostException|handshake_failure|502 Bad Gateway|status code 502|403 Forbidden|401 Unauthorized/i.test(
+        cleanLine
       )
     ) {
       isNetworkOrMirrorFailure = true;
       errors.push({
         category: 'dependency_network_failure',
-        message: line.trim(),
+        message: cleanLine.trim(),
         raw: rawLine,
         suggestedAction:
-          '检查 Maven settings.xml / build.gradle 仓库镜像（如阿里云镜像源 mirror）或企业私服网络连接与凭证。',
+          '检查 ~/.m2/settings.xml 中的仓库镜像配置（如配置阿里云 public 镜像源），或检查企业私服网络连接、VPN 及凭证。',
       });
       continue;
     }
 
-    // Check JDK / compiler release version mismatch
+    // 2. JDK version & compiler release issues
     if (
-      /Source option \d+ is no longer supported|release version \d+ not supported|invalid source release|Target release \d+ conflicts with|Unsupported class file major version|has been compiled by a more recent version of the Java Runtime/i.test(
-        line
+      /Source option \d+ is no longer supported|release version \d+ not supported|invalid source release|Target release \d+ conflicts with|Unsupported class file major version \d+/i.test(
+        cleanLine
       )
     ) {
       isJdkVersionIssue = true;
       errors.push({
         category: 'jdk_version_mismatch',
-        message: line.trim(),
+        message: cleanLine.trim(),
         raw: rawLine,
         suggestedAction:
-          '检查 pom.xml/build.gradle 中的 java.version / release / sourceCompatibility 是否与当前使用的 JDK 版本一致。',
+          '检查 pom.xml 或 build.gradle 中的 java.version / release / sourceCompatibility 是否与编译运行使用的本地 JDK 版本一致。',
       });
       continue;
     }
 
-    // Check Maven POM processing errors (multi-module reactor)
-    if (line.includes('@') && /line\s+\d+,\s*column\s+\d+/i.test(line)) {
-      const pomMatch = cleanLine.match(pomErrRegex);
-      if (pomMatch) {
-        const [, errorMsg, filePath, lineStr, colStr] = pomMatch;
-        let action = 'POM 解析错误：检查 pom.xml 中配置标签及依赖声明是否符合 Maven POM 规范。';
-        if (/Non-resolvable parent POM/i.test(errorMsg)) {
-          action =
-            '检查 pom.xml 中的父 POM 坐标与 parent.relativePath 指向，确保父 POM 已安装至本地仓库或相对路径有效。';
-        } else if (/dependencies\.dependency\.version.*missing/i.test(errorMsg)) {
-          action =
-            '依赖缺少版本号：在 pom.xml 中补充 <version>，或在父 POM <dependencyManagement> 中声明受管版本。';
-        }
+    // 3. JDK 17/21 InaccessibleObjectException (Strong encapsulation)
+    if (/InaccessibleObjectException.*module java\.base does not "opens /i.test(cleanLine)) {
+      isJdkVersionIssue = true;
+      const moduleMatch = cleanLine.match(/opens\s+([a-zA-Z0-9_.]+)\s+to/i);
+      const targetPackage = moduleMatch ? moduleMatch[1] : 'java.lang';
+      errors.push({
+        category: 'jdk_reflection_inaccessible',
+        symbol: `java.base/${targetPackage}`,
+        message: cleanLine.trim(),
+        raw: rawLine,
+        suggestedAction: `在 surefire/failsafe 插件的 <argLine> 中添加: @{argLine} --add-opens java.base/${targetPackage}=ALL-UNNAMED`,
+      });
+      continue;
+    }
 
+    // 4. Maven Enforcer Rule Failure
+    if (/Rule \d+:\s+org\.apache\.maven\.enforcer\.rules\./i.test(cleanLine)) {
+      const isBanned = /BannedDependencies/i.test(cleanLine);
+      const isConvergence = /DependencyConvergence/i.test(cleanLine);
+      errors.push({
+        file: 'pom.xml',
+        category: 'enforcer_rule_failure',
+        symbol: isBanned ? 'BannedDependencies' : isConvergence ? 'DependencyConvergence' : 'EnforcerRule',
+        message: cleanLine.trim(),
+        raw: rawLine,
+        suggestedAction: isBanned
+          ? '在引入禁用依赖的直接 dependency 中添加 <exclusions> 排除该传递依赖。'
+          : '在父 POM 的 <dependencyManagement> 中统一锁定该冲突依赖的精确版本。',
+      });
+      continue;
+    }
+
+    // 5. MyBatis Missing XML / Invalid Bound Statement
+    if (/BindingException:\s*Invalid bound statement \(not found\):\s*([^\s]+)/i.test(cleanLine)) {
+      const match = cleanLine.match(/BindingException:\s*Invalid bound statement \(not found\):\s*([^\s]+)/i);
+      const fullMethod = match ? match[1] : '';
+      errors.push({
+        category: 'mybatis_mapper_missing',
+        symbol: fullMethod,
+        message: cleanLine.trim(),
+        raw: rawLine,
+        suggestedAction:
+          '检查 pom.xml 中的 <build><resources> 是否包含了 src/main/java 下的 **/*.xml，或将 XML 移至 src/main/resources/mapper/。',
+      });
+      continue;
+    }
+
+    // 6. Maven POM Reactor issues
+    if (cleanLine.includes('@') && cleanLine.includes('line') && cleanLine.includes('column')) {
+      const pomMatch = lineWithoutPrefix.match(pomErrRegex);
+      if (pomMatch) {
+        const [, msg, pomPath, lineStr, colStr] = pomMatch;
         errors.push({
-          file: filePath ? filePath.trim() : 'pom.xml',
+          file: pomPath ? pomPath.trim() : 'pom.xml',
           line: parseInt(lineStr, 10),
           column: parseInt(colStr, 10),
           category: 'dependency_unresolved',
-          message: errorMsg.trim(),
+          message: msg.trim(),
           raw: rawLine,
-          suggestedAction: action,
+          suggestedAction: '检查该 pom.xml 的对应行号，补充缺失的 parent / dependency version 或调整坐标配置。',
         });
         continue;
       }
     }
 
-    // Check Maven child module missing
-    if (line.includes('Child module') && line.includes('does not exist')) {
-      const childMatch = cleanLine.match(childModuleRegex);
+    // 7. Missing child module
+    if (cleanLine.includes('Child module') && cleanLine.includes('does not exist')) {
+      const childMatch = lineWithoutPrefix.match(childModuleRegex);
       if (childMatch) {
-        const [, childPath, parentPom] = childMatch;
+        const [, child, parent] = childMatch;
         errors.push({
-          file: parentPom.trim(),
+          file: parent ? `${parent}/pom.xml` : 'pom.xml',
           category: 'dependency_unresolved',
-          symbol: childPath.trim(),
-          message: line.trim(),
+          symbol: child,
+          message: cleanLine.trim(),
           raw: rawLine,
-          suggestedAction:
-            '父 POM <modules> 声明的子模块目录不存在，请检查子模块文件夹路径拼写或创建对应模块目录。',
+          suggestedAction: `检查 ${parent} 的 <modules> 配置，子模块目录 ${child} 缺失或拼写错误。`,
         });
         continue;
       }
     }
 
-    // Check Maven compiler error line
-    if (cleanLine.includes(':[')) {
-      const mavenMatch = cleanLine.match(mavenErrRegex);
+    // 8. Maven Compiler Error Line
+    if (lineWithoutPrefix.includes(':[')) {
+      const mavenMatch = lineWithoutPrefix.match(mavenErrRegex);
       if (mavenMatch) {
         const [, file, lineStr, colStr, message] = mavenMatch;
-        const parsed = classifyCompilerError(message, lines.slice(i, i + 6));
+        const continuation = collectContinuationLines(rawLines, i);
+        const parsed = classifyCompilerError(message, continuation);
         errors.push({
           file: file.trim(),
           line: parseInt(lineStr, 10),
@@ -212,209 +256,47 @@ export function parseJavaBuildLog(log: string): ParseResult {
       }
     }
 
-    // Check Gradle compiler error line
-    const gradleMatch = line.match(gradleErrRegex);
-    if (gradleMatch) {
-      const [, file, lineStr, colStr, message] = gradleMatch;
-      const parsed = classifyCompilerError(message, lines.slice(i, i + 6));
-      errors.push({
-        file: file.trim(),
-        line: parseInt(lineStr, 10),
-        column: colStr ? parseInt(colStr, 10) : undefined,
-        category: parsed.category,
-        symbol: parsed.symbol,
-        message: message.trim(),
-        raw: rawLine,
-        suggestedAction: parsed.suggestedAction,
-      });
-      continue;
+    // 9. Gradle Compiler Error Line
+    if (cleanLine.includes(': error:') || cleanLine.startsWith('e: ')) {
+      const gradleMatch = cleanLine.match(gradleErrRegex);
+      if (gradleMatch) {
+        const [, file, lineStr, colStr, message] = gradleMatch;
+        const continuation = collectContinuationLines(rawLines, i);
+        const parsed = classifyCompilerError(message, continuation);
+        errors.push({
+          file: file.trim(),
+          line: parseInt(lineStr, 10),
+          column: colStr ? parseInt(colStr, 10) : undefined,
+          category: parsed.category,
+          symbol: parsed.symbol,
+          message: message.trim(),
+          raw: rawLine,
+          suggestedAction: parsed.suggestedAction,
+        });
+        continue;
+      }
     }
 
-    // Check Gradle unresolved dependency: "> Could not find com.foo:bar:1.0"
-    const gradleFindMatch = line.match(/>\s*Could not find\s+([^\s:]+:[^\s:]+(?::[^\s:]+)?)/i);
-    if (gradleFindMatch) {
-      const artifact = gradleFindMatch[1].trim().replace(/[\.\s]+$/, '');
-      errors.push({
-        file: 'build.gradle',
-        category: 'dependency_unresolved',
-        symbol: artifact,
-        message: line.trim(),
-        raw: rawLine,
-        suggestedAction:
-          'Gradle 依赖项未找到，请核对 build.gradle 中的依赖坐标、版本号或 Maven 仓库声明。',
-      });
-      continue;
-    }
-
-    // Check Maven unresolved dependency (without network error)
-    if (
-      /Could not find artifact\s+([^\s]+)\s+in|Failure to find\s+([^\s]+)\s+in|The following artifacts could not be resolved:\s*([^\r\n]+)/i.test(
-        line
-      )
-    ) {
-      const artMatch =
-        line.match(/Could not find artifact\s+([^\s]+)/i) ||
-        line.match(/Failure to find\s+([^\s]+)/i) ||
-        line.match(/The following artifacts could not be resolved:\s*([^\r\n]+)/i);
-      const symbol = artMatch && artMatch[1] ? artMatch[1].trim().replace(/[\.\s]+$/, '') : undefined;
-      errors.push({
-        file: 'pom.xml',
-        category: 'dependency_unresolved',
-        symbol,
-        message: line.trim(),
-        raw: rawLine,
-        suggestedAction:
-          '依赖项在本地与远程仓库中均未找到。检查 groupId/artifactId/version 坐标拼写，或先运行 mvn install 构建前置依赖模块。',
-      });
-      continue;
-    }
-
-    // Check standalone MapStruct / annotation processor error lines
-    if (/No implementation was created for|Internal error in the mapping processor|Can't generate mapping method/i.test(line)) {
-      errors.push({
-        category: 'mapstruct_issue',
-        message: line.trim(),
-        raw: rawLine,
-        suggestedAction:
-          '检查 MapStruct Mapper 接口字段映射配置。若结合 Lombok 使用，请确保编译器插件中 lombok 先于 mapstruct 声明，并引入 lombok-mapstruct-binding。',
-      });
-      continue;
-    }
-
-    // Check Checkstyle / SpotBugs plugin failures
-    if (/Failed to execute goal.*maven-checkstyle-plugin|> Task :checkstyle.*FAILED|SpotBugs found \d+ violations/i.test(line)) {
+    // 10. Checkstyle / SpotBugs violations
+    if (/\[ERROR\].*checkstyle|\[ERROR\].*spotbugs/i.test(cleanLine)) {
       errors.push({
         category: 'checkstyle_spotbugs',
-        message: line.trim(),
+        message: cleanLine.trim(),
         raw: rawLine,
-        suggestedAction: '代码规范或静态检查未通过，请检查 Checkstyle/SpotBugs 报错规则并调整代码格式。',
+        suggestedAction: '代码风格或静态分析检查失败，根据插件报告修正违规项或在特定方法上做针对性注释。',
       });
       continue;
     }
+  }
 
-    // Check standalone Jakarta EE 9+ / javax mismatch (without file location)
-    if (/package javax\.(?:servlet|persistence|annotation|transaction)|import javax\.(?:servlet|persistence|annotation|transaction)/i.test(line)) {
-      errors.push({
-        category: 'jakarta_javax_mismatch',
-        message: line.trim(),
-        raw: rawLine,
-        suggestedAction:
-          'Spring Boot 3.x+ 已迁移至 Jakarta EE，请将 javax.* 替换为 jakarta.*（例如 jakarta.servlet.*, jakarta.persistence.*）。',
-      });
-      continue;
-    }
-
-    // Check JDK 17/21 strong encapsulation reflection error (InaccessibleObjectException)
-    if (
-      /InaccessibleObjectException|module\s+[\w\.]+\s+does not\s+"?opens?\s+[\w\.]+"?\s+to/i.test(cleanLine)
-    ) {
-      isJdkVersionIssue = true;
-      const modMatch = cleanLine.match(/module\s+([\w\.]+)\s+does not\s+"?opens?\s+([\w\.]+)"?\s+to/i);
-      const symbol = modMatch ? `${modMatch[1]}/${modMatch[2]}` : 'java.base/java.lang';
-      errors.push({
-        category: 'jdk_reflection_inaccessible',
-        symbol,
-        message: line.trim(),
-        raw: rawLine,
-        suggestedAction: `JDK 17/21 强封装反射异常（InaccessibleObjectException）：module ${modMatch ? modMatch[1] : 'java.base'} 未向未命名模块开放 ${modMatch ? modMatch[2] : 'java.lang'}。请在 pom.xml 的 maven-surefire-plugin 或 maven-compiler-plugin 中配置 <argLine>--add-opens ${symbol}=ALL-UNNAMED</argLine>；若为 Gradle，在 tasks.withType(Test) 中添加 jvmArgs('--add-opens', '${symbol}=ALL-UNNAMED')。`,
-      });
-      continue;
-    }
-
-    // Check Maven Enforcer plugin failures (BannedDependencies, DependencyConvergence)
-    if (
-      /Rule \d+:.*(?:BannedDependencies|DependencyConvergence)|Found Banned Dependency:|Dependency convergence error for/i.test(
-        cleanLine
-      )
-    ) {
-      let symbol: string | undefined;
-      let action: string;
-      const isBanned = /BannedDependenc|Found Banned Dependency/i.test(cleanLine);
-      const isConvergence = /DependencyConvergence|Dependency convergence error/i.test(cleanLine);
-
-      const bannedMatch = cleanLine.match(/Found Banned Dependency:\s*([^\s]+)/i);
-      const convMatch = cleanLine.match(/Dependency convergence error for\s+([^\s]+)/i);
-
-      if (bannedMatch) {
-        symbol = cleanSymbol(bannedMatch[1]);
-      } else if (convMatch) {
-        symbol = cleanSymbol(convMatch[1]);
-      } else {
-        const ahead = lines.slice(i, i + 8).join('\n');
-        const aheadBanned = ahead.match(/Found Banned Dependency:\s*([^\s]+)/i);
-        const aheadConv = ahead.match(/Dependency convergence error for\s+([^\s]+)/i);
-        if (aheadBanned) {
-          symbol = cleanSymbol(aheadBanned[1]);
-        } else if (aheadConv) {
-          symbol = cleanSymbol(aheadConv[1]);
-        }
-      }
-
-      if (isBanned || (!isConvergence && /Banned/i.test(cleanLine))) {
-        action = `Maven Enforcer 规则校验失败（BannedDependencies）：检测到被禁止的依赖 ${symbol || '违规组件'}。请在引入它的直接依赖中配置 <exclusions> 排除该传递依赖（例如排除 commons-logging 改用 jcl-over-slf4j），或替换为合规依赖。`;
-      } else if (isConvergence) {
-        action = `Maven Enforcer 依赖收敛失败（DependencyConvergence）：依赖 ${symbol || '冲突组件'} 存在多版本冲突。请在父 POM 的 <dependencyManagement> 中显式锁定该依赖的版本号，强制全工程收敛统一版本。`;
-      } else {
-        action =
-          'Maven Enforcer 规则检查失败：请根据具体规则在 pom.xml 中添加 <exclusions> 排除违规依赖，或在 <dependencyManagement> 中显式声明统一版本以满足依赖收敛。';
-      }
-
-      errors.push({
-        file: 'pom.xml',
-        category: 'enforcer_rule_failure',
-        symbol,
-        message: line.trim(),
-        raw: rawLine,
-        suggestedAction: action,
-      });
-      continue;
-    }
-
-    // Check MyBatis / MyBatis-Plus invalid bound statement (mapper XML missing in resources)
-    if (
-      /Invalid bound statement \(not found\)|No mapper XML found for mapper interface/i.test(
-        cleanLine
-      )
-    ) {
-      const boundMatch =
-        cleanLine.match(/Invalid bound statement \(not found\):\s*([^\s\r\n\(\)]+)/i) ||
-        cleanLine.match(/No mapper XML found for mapper interface:\s*([^\s\r\n\(\)]+)/i);
-      const symbol = boundMatch ? cleanSymbol(boundMatch[1]) : undefined;
-
-      let mapperFile = 'pom.xml';
-      if (symbol) {
-        const parts = symbol.split('.');
-        if (parts.length > 1) {
-          const className = parts[parts.length - 2];
-          mapperFile = `${className}.xml`;
-        }
-      }
-
-      errors.push({
-        file: mapperFile,
-        category: 'mybatis_mapper_missing',
-        symbol,
-        message: line.trim(),
-        raw: rawLine,
-        suggestedAction:
-          'MyBatis / MyBatis-Plus Mapper 映射绑定失败（Invalid bound statement not found）：常见原因为 Mapper XML 位于 src/main/java 目录下但 Maven 默认未打包 XML 文件。请在 pom.xml <build><resources> 中显式添加资源包含：<resource><directory>src/main/java</directory><includes><include>**/*.xml</include></includes><filtering>false</filtering></resource>；或将 Mapper XML 移动至 src/main/resources/mapper/ 并在 application.yml 中配置 mybatis-plus.mapper-locations: classpath*:/mapper/**/*.xml。',
-      });
-      continue;
-    }
-
-    // Standalone encoding error line
-    if (/unmappable character.*for encoding/i.test(cleanLine)) {
-      const encMatch = cleanLine.match(/for encoding\s+([\w\-]+)/i);
-      errors.push({
-        category: 'encoding_error',
-        symbol: encMatch ? encMatch[1].trim() : undefined,
-        message: line.trim(),
-        raw: rawLine,
-        suggestedAction:
-          '源码字符编码错误（Windows 环境常见）：请在 pom.xml <properties> 中显式配置 <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>，并在 maven-compiler-plugin 中指定 <encoding>UTF-8</encoding>；若为 Gradle，在 tasks.withType(JavaCompile) 中设置 options.encoding = "UTF-8"。',
-      });
-      continue;
-    }
+  // Fallback Catch-all: If build definitely failed but no specific error was captured
+  if (errors.length === 0 && hasExplicitFailureSign) {
+    errors.push({
+      category: 'unknown',
+      message: generalFailureMessage || '构建失败，但日志中未识别出已知格式的编译器报错行。',
+      raw: generalFailureMessage || 'BUILD FAILURE',
+      suggestedAction: '请提供完整的 mvn/gradle 构建控制台输出（带 -X 或 --stacktrace），以便定位确切原因。',
+    });
   }
 
   return {
@@ -424,77 +306,90 @@ export function parseJavaBuildLog(log: string): ParseResult {
     errors,
     isNetworkOrMirrorFailure,
     isJdkVersionIssue,
+    truncated,
   };
 }
 
-function cleanSymbol(sym?: string): string | undefined {
-  if (!sym) return undefined;
-  return sym.replace(/^[`'"]|[`'"]$/g, '').trim();
+/**
+ * Collects ONLY the continuation lines that belong to the current error.
+ * Stops immediately when encountering a new error, empty line, or next log entry.
+ */
+function collectContinuationLines(lines: string[], currentIndex: number): string[] {
+  const result: string[] = [];
+  for (let j = currentIndex + 1; j < Math.min(lines.length, currentIndex + 6); j++) {
+    const raw = lines[j];
+    const clean = cleanLineText(raw);
+    const withoutPrefix = clean.replace(/^\s*(?:\[ERROR\]\s*)+/, '').trim();
+
+    // If next line starts a new compiler error, stop immediately!
+    if (
+      withoutPrefix.includes(':[') ||
+      withoutPrefix.includes(': error:') ||
+      clean.includes(': error:') ||
+      withoutPrefix.startsWith('e: ')
+    ) {
+      break;
+    }
+
+    // If it's a known continuation line (e.g., symbol:, location:, required:, found:)
+    if (
+      withoutPrefix.startsWith('symbol:') ||
+      withoutPrefix.startsWith('location:') ||
+      withoutPrefix.startsWith('required:') ||
+      withoutPrefix.startsWith('found:')
+    ) {
+      result.push(withoutPrefix);
+    } else {
+      // Stop collecting if it's not a recognized continuation
+      break;
+    }
+  }
+  return result;
 }
 
 function classifyCompilerError(
   message: string,
-  contextLines: string[]
+  continuationLines: string[]
 ): { category: ErrorCategory; symbol?: string; suggestedAction: string } {
-  const context = contextLines.join('\n');
-
-  // Jakarta / javax mismatch check in compiler error line
-  if (
-    /package javax\.(?:servlet|persistence|annotation|transaction)|import javax\.(?:servlet|persistence|annotation|transaction)/i.test(
-      message
-    ) ||
-    /package javax\.(?:servlet|persistence|annotation|transaction)/i.test(context)
-  ) {
+  // 1. Jakarta EE 9+ / javax mismatch (ONLY from the message itself to prevent bleed)
+  if (/package javax\.servlet|package javax\.persistence|package javax\.annotation\.Resource/i.test(message)) {
     return {
       category: 'jakarta_javax_mismatch',
       suggestedAction:
-        'Spring Boot 3.x+ 已迁移至 Jakarta EE，请将 javax.* 替换为 jakarta.*（例如 jakarta.servlet.*, jakarta.persistence.*）。',
+        'Spring Boot 3.x+ 已迁移至 Jakarta EE，将 javax.servlet / javax.persistence 等规范包替换为 jakarta.*。注意不要误替换 javax.annotation.processing 等 JSR 规范包。',
     };
   }
 
-  // Encoding error check in compiler error line
-  if (/unmappable character/i.test(message) || /unmappable character/i.test(context)) {
-    const encMatch = message.match(/for encoding\s+([\w\-]+)/i) || context.match(/for encoding\s+([\w\-]+)/i);
-    const encoding = cleanSymbol(encMatch ? encMatch[1] : undefined);
+  // 2. Encoding errors (ONLY from the message itself)
+  if (/unmappable character.*for encoding/i.test(message)) {
+    const encMatch = message.match(/for encoding\s+([a-zA-Z0-9_\-]+)/i);
+    const enc = encMatch ? encMatch[1] : undefined;
     return {
       category: 'encoding_error',
-      symbol: encoding,
+      symbol: enc,
       suggestedAction:
-        '源码字符编码错误（Windows 环境常见）：请在 pom.xml <properties> 中显式配置 <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>，并在 maven-compiler-plugin 中指定 <encoding>UTF-8</encoding>；若为 Gradle，在 tasks.withType(JavaCompile) 中设置 options.encoding = "UTF-8"。',
+        '源码包含非当前编码字符。在 pom.xml 的 <properties> 中声明 <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding> 并配置 maven-compiler-plugin 编码。',
     };
   }
 
-  // MapStruct issue
-  if (
-    /mapping method|mapping processor|mapstruct|No implementation was created for|Unknown property [^\r\n]* in result type/i.test(
-      message
-    ) ||
-    /mapstruct/i.test(context)
-  ) {
-    return {
-      category: 'mapstruct_issue',
-      suggestedAction:
-        '检查 MapStruct Mapper 接口字段映射配置。若结合 Lombok 使用，请确保编译器插件中 lombok 先于 mapstruct 声明，并引入 lombok-mapstruct-binding。',
-    };
-  }
+  // 3. Cannot find symbol
+  if (/cannot find symbol/i.test(message)) {
+    // Extract symbol exclusively from continuation lines
+    let symbol: string | undefined;
+    for (const line of continuationLines) {
+      const symbolMatch = line.match(/^symbol:\s+(?:class|variable|method|constructor)\s+([a-zA-Z0-9_]+)/i);
+      if (symbolMatch) {
+        symbol = symbolMatch[1];
+        break;
+      }
+    }
 
-  // Cannot find symbol / Unresolved reference
-  if (/cannot find symbol|unresolved reference/i.test(message)) {
-    // Extract symbol: class X, variable Y, method Z(), constructor W
-    const symbolMatch =
-      context.match(/symbol:\s+(?:class|variable|method|constructor|interface)\s+([^\r\n\(\s]+)/i) ||
-      message.match(/unresolved reference:\s*([^\r\n\(\s]+)/i) ||
-      message.match(/cannot find symbol\s*[:\-]?\s*(?:class|variable|method)?\s*([^\r\n\(\s]+)?/i);
-
-    const symbol = cleanSymbol(symbolMatch && symbolMatch[1] ? symbolMatch[1] : undefined);
-
-    // Check if Lombok getter/setter/builder issue
-    if (/^(?:get[A-Z]|set[A-Z]|is[A-Z]|builder$|build$|toBuilder$)/.test(symbol || '')) {
+    if (symbol && /^(?:get[A-Z]|set[A-Z]|is[A-Z]|builder$|build$)/.test(symbol)) {
       return {
         category: 'lombok_issue',
         symbol,
         suggestedAction:
-          '可能是 Lombok 注解处理器未启用或失效。检查 pom.xml 或 build.gradle 中编译器插件是否配置了 lombok annotation processor。',
+          'Lombok 生成的方法找不到。检查 pom.xml 中 maven-compiler-plugin 是否配置了 lombok 的 annotationProcessorPaths。',
       };
     }
 
@@ -507,19 +402,17 @@ function classifyCompilerError(
     };
   }
 
+  // 4. Package does not exist
   if (/package\s+([\w\.]+)\s+does not exist/i.test(message)) {
     const pkgMatch = message.match(/package\s+([\w\.]+)\s+does not exist/i);
-    const pkg = cleanSymbol(pkgMatch ? pkgMatch[1] : undefined);
-
-    if (pkg && /^javax\.(?:servlet|persistence|annotation|transaction)/.test(pkg)) {
+    const pkg = pkgMatch ? pkgMatch[1] : undefined;
+    if (pkg && pkg.startsWith('javax.servlet')) {
       return {
         category: 'jakarta_javax_mismatch',
         symbol: pkg,
-        suggestedAction:
-          'Spring Boot 3.x+ 已迁移至 Jakarta EE，请将 javax.* 替换为 jakarta.*（例如 jakarta.servlet.*, jakarta.persistence.*）。',
+        suggestedAction: 'Spring Boot 3.x 已废弃 javax.servlet，请迁移为 jakarta.servlet。',
       };
     }
-
     return {
       category: 'package_not_exist',
       symbol: pkg,
@@ -527,78 +420,53 @@ function classifyCompilerError(
     };
   }
 
-  // Incompatible types: supports nested generics, Kotlin type mismatch, and bounds conflict
-  if (/incompatible types|type mismatch/i.test(message) || /type mismatch/i.test(context)) {
-    // Format 1: incompatible types: X cannot be converted to Y
-    const convMatch = message.match(/incompatible types:\s*(.+?)\s+cannot be converted to\s+(.+)$/i);
-    // Format 2: Kotlin: Type mismatch: inferred type is X but Y was expected
-    const kotlinMatch = message.match(/inferred type is\s+(.+?)\s+but\s+(.+?)\s+was expected/i);
-    // Format 3: Javac context lines: required: Y \n found: X
-    const reqMatch = context.match(/required:\s*([^\r\n]+)/i);
-    const foundMatch = context.match(/found:\s*([^\r\n]+)/i);
-
+  // 5. Incompatible types
+  if (/incompatible types/i.test(message)) {
+    let req: string | undefined;
     let found: string | undefined;
-    let required: string | undefined;
-
-    if (convMatch) {
-      found = cleanSymbol(convMatch[1]);
-      required = cleanSymbol(convMatch[2]);
-    } else if (kotlinMatch) {
-      found = cleanSymbol(kotlinMatch[1]);
-      required = cleanSymbol(kotlinMatch[2]);
-    } else if (reqMatch && foundMatch) {
-      required = cleanSymbol(reqMatch[1]);
-      found = cleanSymbol(foundMatch[1]);
+    for (const line of continuationLines) {
+      if (line.startsWith('required:')) req = line.replace('required:', '').trim();
+      if (line.startsWith('found:')) found = line.replace('found:', '').trim();
     }
-
-    if (found && required) {
-      return {
-        category: 'incompatible_types',
-        symbol: `${found} -> ${required}`,
-        suggestedAction: `类型不匹配：期望类型 '${required}'，实际类型为 '${found}'。请核对变量/入参声明或方法返回类型，添加类型适配（如 map/collect 或类型强转），切勿盲目修改原有公共方法签名。`,
-      };
-    }
-
-    // Check bounds conflict: "inference variable T has incompatible bounds"
-    if (/incompatible bounds|equality constraints/i.test(message) || /incompatible bounds/i.test(context)) {
-      return {
-        category: 'incompatible_types',
-        suggestedAction:
-          '泛型推断类型边界约束冲突（incompatible bounds）。请在方法调用处显式指定泛型参数（例如 <TargetType>method()），或检查集合元素类型是否一致。',
-      };
-    }
-
+    const typePair = req && found ? `${found} -> ${req}` : undefined;
     return {
       category: 'incompatible_types',
-      suggestedAction: '类型不匹配。检查方法出参或变量声明，添加合法强转或类型适配转换。',
+      symbol: typePair,
+      suggestedAction: typePair
+        ? `类型不匹配（实际: ${found}，要求: ${req}）。添加合法类型转换或适配返回值。`
+        : '类型不匹配。检查方法出参或变量声明，添加合法强转或类型适配转换。',
     };
   }
 
-  if (/cannot be applied to given types|cannot find method[^\r\n]*with compatible parameters/i.test(message)) {
+  // 6. Method cannot be applied
+  if (/cannot be applied to given types/i.test(message)) {
     return {
       category: 'method_not_applicable',
       suggestedAction: '入参类型或参数数量与重载方法不符，请核对方法签名入参。',
     };
   }
 
-  if (/variable [^\r\n]+ might not have been initialized/i.test(message)) {
+  // 7. Uninitialized variable
+  if (/variable .* might not have been initialized/i.test(message)) {
     return {
       category: 'uninitialized_variable',
       suggestedAction: '局部变量在使用前未初始化，赋予默认值或在所有分支完成赋值。',
     };
   }
 
-  if (/non-static [^\r\n]+ cannot be referenced from a static context/i.test(message)) {
+  // 8. Static context violation
+  if (/non-static method .* cannot be referenced from a static context/i.test(message)) {
     return {
       category: 'static_context_violation',
       suggestedAction: '静态方法中引用了实例方法/字段。实例化对象调用或将目标方法设为 static。',
     };
   }
 
+  // 9. Annotation processor error
   if (/Annotation processor/i.test(message)) {
     return {
       category: 'annotation_processor_error',
-      suggestedAction: '注解处理器（Lombok / MapStruct）配置冲突，核对 compiler-plugin 里的 processor 声明顺序。',
+      suggestedAction: '注解处理器配置冲突，核对 compiler-plugin 里的 processor 声明顺序（如 Lombok 必须在 MapStruct 前）。',
     };
   }
 

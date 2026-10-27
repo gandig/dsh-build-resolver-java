@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Java Build Resolver",
+    "description": "Surgical resolver for Java, Maven, and Gradle build, compilation, and dependency errors."
+  }
+}

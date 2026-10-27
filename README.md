@@ -1,76 +1,92 @@
 # dsh-build-resolver-java ☕️
 
-> **Java / Maven / Gradle 构建与编译故障定点修复专家插件** (面向 DeepSeek Harness / DSH 生态)
+> **Surgical build, compilation, and dependency error resolution plugin for DeepSeek Harness (DSH).**
 >
-> 灵感源自 ECC (Everything Claude Code) 的 `java-build-resolver`，针对 DeepSeek 模型推理特性与国内 Java 企业级生产环境做了深度增强与本土化升级。
+> Inspired by ECC's (`Everything Claude Code`) `java-build-resolver`, heavily adapted and reinforced for DeepSeek models, the Cordis plugin lifecycle, and modern enterprise Java ecosystems.
+
+[中文文档](README.zh-CN.md)
 
 ---
 
-## 🌟 为什么需要它？
+## 🌟 Why dsh-build-resolver-java?
 
-在日常使用 AI 智能体开发 Java 项目时，一旦运行 `mvn compile` 或 `gradle build` 报错，通用 AI 往往会出现以下痛点：
-1. **胡乱重构**：本只需加一个 `import`，AI 却把整个方法或业务类从头重写，改坏原本正常的逻辑。
-2. **越修错越多**：面对泛型、重载或注解处理器冲突时，盲目修改方法签名，引发连锁编译报错。
-3. **环境水土不服**：不清楚 Spring Boot 3 的 `jakarta.*` 升级要求、Lombok/MapStruct 处理器加载顺序，或者直接被国内 Maven 镜像超时卡死。
+When AI agents work on Java / Maven / Gradle codebases, compiler errors commonly trigger chaotic failure loops:
+1. **Uncontrolled Refactoring**: The agent rewrites entire methods or classes instead of making minimal, surgical fixes.
+2. **Cascading Errors**: Guessing at generic bounds, overloads, or annotation processor bugs often compounds errors.
+3. **Environment Blind Spots**: Missing Jakarta EE namespace migration rules, Lombok/MapStruct processor order conflicts, or network mirror timeouts.
 
-**`dsh-build-resolver-java` 为 DSH 注入了严苛的工程纪律：**
-- 🎯 **外科手术式修复（Surgical Fixes Only）**：绝不重构业务代码，只做最小行级修改。
-- 🛡 **三击熔断保护（Three-Strike Rule）**：同一错误修改 3 次不通过立即中断并分析深层原因，杜绝死循环。
-- 🇨🇳 **国内企业级暗坑深度覆盖**：
-  - Windows GBK 编码致中文源码错乱 (`unmappable character` -> `project.build.sourceEncoding` UTF-8)；
-  - JDK 17/21 强封装反射限制 (`InaccessibleObjectException` -> `--add-opens` 模块导出)；
-  - Maven Enforcer 禁令与依赖收敛拦截 (`BannedDependencies` 排除 & `DependencyConvergence` 版本锁定)；
-  - MyBatis / MyBatis-Plus 资源打包漏打 (`Invalid bound statement` 绑定失败与 POM resources XML 构建期检测)；
-  - 阿里云公共镜像与企业私服超时/PKIX SSL 诊断。
-- ⚡️ **结构化日志解析引擎**：直接解析提取控制台报错的 `[file:line:col]`、错误类型与关键 Symbol，精准投喂给 DeepSeek。
+**`dsh-build-resolver-java` introduces strict engineering discipline:**
+- 🎯 **Surgical Fixes Only**: Never refactor business logic; fix only what failed compilation.
+- 🛡 **Three-Strike Circuit Breaker**: Aborts and reports root causes after 3 unsuccessful attempts on the same error.
+- 🇨🇳 **Enterprise Environment Awareness**: Handles encoding mismatches (Windows GBK), JDK 17/21 reflection limits (`--add-opens`), Maven Enforcer convergence rules, and MyBatis XML packaging omissions.
+- ⚡️ **ReDoS-Resistant Parser Engine**: High-performance linear parser (<3ms) with zero context bleeding between adjacent errors.
+- 🧩 **First-Class DSH Integration**: Registers runtime tools (`java_parse_build_errors`, `java_inspect_project`), system prompt guidance, and native Skill (`java-build-resolver`).
 
 ---
 
-## 📦 安装与启用
+## 📦 Installation
 
-### 在 DSH 终端中安装：
+Install into your active DSH profile using the DSH CLI:
+
 ```bash
-# 方式 1：通过 NPM 安装（发布后）
+# Add to your web profile (after publication)
 dsh plugin --profile web add dsh-build-resolver-java
 
-# 方式 2：直接通过 GitHub 仓库安装
-dsh plugin --profile web add github:ihuajiu/dsh-build-resolver-java
+# Or from local source during development
+dsh plugin --profile web add ./
 ```
 
 ---
 
-## 🚀 核心工作流
+## 🛠 Provided Capabilities
+
+### 1. In-Memory Skill (`java-build-resolver`)
+Registered directly into the DSH Skill catalog (`ctx.skills.register`).
+When compiler errors occur, DeepSeek Harness automatically invokes `/java-build-resolver` to guide step-by-step resolution.
+
+### 2. Model-Facing Tools (`ctx.tools`)
+- **`java_parse_build_errors`**: Parses raw Maven or Gradle terminal logs, stripping ANSI codes and timestamps, and returns structured `[file:line:col]`, classified categories, symbols, and surgical fix recommendations.
+- **`java_inspect_project`**: Inspects `pom.xml` or `build.gradle` to detect the build tool, framework (Spring Boot / Quarkus / General), and static configuration risks (e.g. missing UTF-8 encoding or MyBatis XML mapping rules).
+
+---
+
+## 🚀 Workflow
 
 ```text
-1. 框架与环境探查   -> 自动判定 Spring Boot (2.x/3.x) / Quarkus / 通用 Java 与本地 JDK 版本
-2. 捕获编译错误     -> 运行轻量 compile 并结构化解析报错行列号与类型
-3. 定位上下文       -> 只读取报错行周边上下文，不加载多余代码
-4. 外科手术式修复   -> 补齐 import、调整依赖 scope 或修正局部类型
-5. 单步编译验证     -> 重新编译确认错误递减
-6. 熔断保护检查     -> 超过 3 次未修复立即停止汇报
+1. Inspect Project   -> Detect build tool, framework, and configuration risks
+2. Capture Failure   -> Run lightweight compile commands (mvn compile / gradle compileJava)
+3. Structured Parse  -> Extract exact coordinates and error classifications
+4. Surgical Fix      -> Apply minimal line-level edits (imports, dependencies, annotations)
+5. Verify & Repeat   -> Recompile to confirm error reduction
+6. Circuit Breaker   -> Terminate and report if the same error persists 3 times
 ```
 
 ---
 
-## 🛠 插件结构
+## 📂 Project Structure
 
 ```text
 dsh-build-resolver-java/
+├── cordis.patch.yml           # Official DSH profile bundle patch (top-level array)
+├── icon.svg                   # Plugin display icon (vector)
+├── locale/                    # DSH display metadata
+│   ├── en.json
+│   └── zh.json
 ├── src/
-│   ├── index.ts               # DSH/Cordis 插件主入口 (Tool 注册与系统提示词注入)
-│   ├── parser.ts              # Maven/Gradle 编译日志正则提取与分类引擎
-│   └── types.ts               # 类型定义
+│   ├── index.ts               # Cordis plugin entry (tools, prompt, skill registration)
+│   ├── parser.ts              # High-performance build log parser & classifier
+│   └── types.ts               # Type definitions
 ├── skills/
 │   └── java-build-resolver/
-│       ├── SKILL.md           # 核心专家规则与工作流指令（移植并升级自 ECC）
-│       └── patterns.md        # 常见错误外科手术修复速查表
-├── test/                      # 单元测试
-├── package.json
-└── tsconfig.json
+│       ├── SKILL.md           # Surgical resolution instructions & red lines
+│       └── patterns.md        # Reference dictionary of common compiler errors
+├── test/
+│   └── parser.test.ts         # Comprehensive test suite (Node.js test runner)
+└── package.json
 ```
 
 ---
 
-## 📄 开源许可
+## 📄 License
 
 [MIT License](LICENSE)
