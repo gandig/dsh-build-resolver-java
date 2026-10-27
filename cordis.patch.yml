@@ -1,0 +1,4 @@
+# cordis.patch.yml - DSH Profile Bundle Layer Patch
+insert:
+  - id: build-resolver-java
+    name: dsh-build-resolver-java
