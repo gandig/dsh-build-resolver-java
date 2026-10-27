@@ -7,10 +7,11 @@
  * @module dsh-build-resolver-java
  */
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { parseJavaBuildLog, detectBuildTool, detectFramework } from './parser.js';
 export const name = 'build-resolver-java';
-// Declared DSH/Cordis injected services
-export const inject = ['tools', 'systemPrompt', 'skills'];
+// Core required DSH/Cordis injected services
+export const inject = ['tools', 'systemPrompt'];
 /**
  * System prompt injection for DeepSeek agent
  */
@@ -121,54 +122,44 @@ export const tools = [
 export function apply(ctx) {
     // 1. Register tools with ctx.effect lifecycle
     for (const tool of tools) {
-        if (ctx.tools && typeof ctx.tools.register === 'function') {
-            if (typeof ctx.effect === 'function') {
-                ctx.effect(() => ctx.tools.register(tool), `build-resolver-java.tool(${tool.name})`);
-            }
-            else {
-                ctx.tools.register(tool);
-            }
+        if (typeof ctx.effect === 'function') {
+            ctx.effect(() => ctx.tools.register(tool), `build-resolver-java.tool(${tool.name})`);
+        }
+        else {
+            ctx.tools.register(tool);
         }
     }
-    // 2. Register system prompt section with ctx.effect lifecycle
-    if (ctx.systemPrompt) {
-        if (typeof ctx.systemPrompt.section === 'function') {
-            const sectionEntry = {
-                name: 'java-build-resolver',
-                order: 10190,
-                content: () => systemPrompt,
-            };
-            if (typeof ctx.effect === 'function') {
-                ctx.effect(() => ctx.systemPrompt.section(sectionEntry), 'build-resolver-java.systemPrompt()');
-            }
-            else {
-                ctx.systemPrompt.section(sectionEntry);
-            }
-        }
-        else if (typeof ctx.systemPrompt.append === 'function') {
-            ctx.systemPrompt.append(systemPrompt);
-        }
+    // 2. Register system prompt section with ctx.effect lifecycle (using official 'text' field)
+    const sectionEntry = {
+        name: 'java-build-resolver',
+        order: 10190,
+        text: systemPrompt,
+    };
+    if (typeof ctx.effect === 'function') {
+        ctx.effect(() => ctx.systemPrompt.section(sectionEntry), 'build-resolver-java.systemPrompt()');
     }
-    // 3. Register skill via official ctx.skills.register
-    if (ctx.skills && typeof ctx.skills.register === 'function') {
-        try {
+    else {
+        ctx.systemPrompt.section(sectionEntry);
+    }
+    // 3. Register skill via dynamic injection if 'skills' service is present in current profile
+    if (typeof ctx.inject === 'function') {
+        ctx.inject(['skills'], (inner) => {
             const skillPath = new URL('../skills/java-build-resolver/SKILL.md', import.meta.url);
+            const skillDir = fileURLToPath(new URL('../skills/java-build-resolver/', import.meta.url));
             const skillContent = readFileSync(skillPath, 'utf8');
             const skillEntry = {
                 name: 'java-build-resolver',
                 description: 'Surgical resolver for Java, Maven, and Gradle build, compilation, and dependency errors.',
                 content: skillContent,
+                resourceBase: { kind: 'directory', path: skillDir },
             };
-            if (typeof ctx.effect === 'function') {
-                ctx.effect(() => ctx.skills.register(skillEntry), 'build-resolver-java.skill()');
+            if (typeof inner.effect === 'function') {
+                inner.effect(() => inner.skills.register(skillEntry), 'build-resolver-java.skill()');
             }
             else {
-                ctx.skills.register(skillEntry);
+                inner.skills.register(skillEntry);
             }
-        }
-        catch (_err) {
-            // In minimal test environments where skills/ is not located relative to dist, skip gracefully
-        }
+        });
     }
 }
 //# sourceMappingURL=index.js.map

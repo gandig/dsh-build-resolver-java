@@ -128,7 +128,7 @@ test('parseJavaBuildLog: Edge cases and truncation', () => {
 
 test('DSH Plugin: lifecycle, tools, and export forms', async () => {
   assert.equal(name, 'build-resolver-java');
-  assert.deepEqual(inject, ['tools', 'systemPrompt', 'skills']);
+  assert.deepEqual(inject, ['tools', 'systemPrompt']);
 
   // Validate tools schema & execution
   const parseTool = tools.find((t) => t.name === 'java_parse_build_errors')!;
@@ -165,6 +165,7 @@ test('DSH Plugin: lifecycle, tools, and export forms', async () => {
         registeredSkill = sk;
       },
     },
+    inject: (deps: string[], cb: Function) => cb(mockCtx),
     effect: (fn: Function) => fn(),
   };
 
@@ -173,8 +174,10 @@ test('DSH Plugin: lifecycle, tools, and export forms', async () => {
   assert.equal(registeredTools.length, 2);
   assert.ok(registeredSection);
   assert.equal(registeredSection.name, 'java-build-resolver');
+  assert.equal(typeof registeredSection.text, 'string');
   assert.ok(registeredSkill);
   assert.equal(registeredSkill.name, 'java-build-resolver');
+  assert.ok(registeredSkill.resourceBase);
 });
 
 test('DSH Plugin: cordis.patch.yml must be a top-level YAML array', () => {
