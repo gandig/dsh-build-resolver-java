@@ -177,6 +177,7 @@ test('DSH Plugin: lifecycle, tools, and export forms', async () => {
   assert.equal(typeof registeredSection.text, 'string');
   assert.ok(registeredSkill);
   assert.equal(registeredSkill.name, 'java-build-resolver');
+  assert.equal(typeof registeredSkill.source, 'string');
   assert.ok(registeredSkill.resourceBase);
 });
 

@@ -150,6 +150,7 @@ export function apply(ctx) {
             const skillEntry = {
                 name: 'java-build-resolver',
                 description: 'Surgical resolver for Java, Maven, and Gradle build, compilation, and dependency errors.',
+                source: 'plugin:build-resolver-java',
                 content: skillContent,
                 resourceBase: { kind: 'directory', path: skillDir },
             };
