@@ -29,10 +29,13 @@ When AI agents work on Java / Maven / Gradle codebases, compiler errors commonly
 Install into your active DSH profile using the DSH CLI:
 
 ```bash
-# Add to your web profile (after publication)
+# Method 1: Install directly from GitHub (Recommended before npm publication)
+dsh plugin --profile web add github:gandig/dsh-build-resolver-java
+
+# Method 2: Install from NPM (after publication)
 dsh plugin --profile web add dsh-build-resolver-java
 
-# Or from local source during development
+# Method 3: Install from local source during development
 dsh plugin --profile web add ./
 ```
 

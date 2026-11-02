@@ -51,16 +51,16 @@
     "build-resolver",
     "compiler-fix"
   ],
-  "author": "ihuajiu",
+  "author": "gandig",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ihuajiu/dsh-build-resolver-java.git"
+    "url": "git+https://github.com/gandig/dsh-build-resolver-java.git"
   },
   "bugs": {
-    "url": "https://github.com/ihuajiu/dsh-build-resolver-java/issues"
+    "url": "https://github.com/gandig/dsh-build-resolver-java/issues"
   },
-  "homepage": "https://github.com/ihuajiu/dsh-build-resolver-java#readme",
+  "homepage": "https://github.com/gandig/dsh-build-resolver-java#readme",
   "engines": {
     "node": ">=20.11.0",
     "dsh": ">=0.2.1-rc.2 <0.3.0"

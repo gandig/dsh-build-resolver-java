@@ -28,10 +28,13 @@
 
 ### 在 DSH 终端中安装：
 ```bash
-# 方式 1：通过 NPM 安装（发布后）
+# 方式 1：直接通过 GitHub 安装（发布至 NPM 前推荐）
+dsh plugin --profile web add github:gandig/dsh-build-resolver-java
+
+# 方式 2：通过 NPM 安装（发布后）
 dsh plugin --profile web add dsh-build-resolver-java
 
-# 方式 2：开发阶段从本地源码目录安装
+# 方式 3：开发阶段从本地源码目录安装
 dsh plugin --profile web add ./
 ```
 
