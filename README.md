@@ -93,3 +93,7 @@ dsh-build-resolver-java/
 ## 📄 License
 
 [MIT License](LICENSE)
+
+## Third-party attribution
+
+Java build-resolution guidance is adapted from [Everything Claude Code (ECC)](https://github.com/affaan-m/everything-claude-code), licensed under MIT. See [third-party notices](THIRD_PARTY_NOTICES.md) for the upstream copyright and full license.

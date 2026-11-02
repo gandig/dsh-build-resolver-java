@@ -91,3 +91,7 @@ dsh-build-resolver-java/
 ## 📄 开源许可
 
 [MIT License](LICENSE)
+
+## 第三方来源与许可
+
+Java 构建修复指导内容改编自 [Everything Claude Code（ECC）](https://github.com/affaan-m/everything-claude-code)，上游采用 MIT 许可证。原版权声明与许可全文见[第三方声明](THIRD_PARTY_NOTICES.md)。
